@@ -145,56 +145,100 @@ class OutlierDetector:
         self.outliers_info = {}
     
     def detect_iqr(self):
-        """Détecte les outliers avec la méthode IQR"""
-        print(f"\n🔍 DÉTECTION DES ANOMALIES (IQR)")
+        """Détecte les outliers avec la méthode Z-score (|Z| > 3)"""
+        print(f"\n🔍 DÉTECTION DES ANOMALIES (Z-score)")
         print("-" * 60)
         
         self.outliers_mask = pd.DataFrame(False, index=self.df.index, columns=NUMERIC_COLUMNS)
         
         for col in NUMERIC_COLUMNS:
-            Q1 = self.df[col].quantile(0.25)
-            Q3 = self.df[col].quantile(0.75)
-            IQR = Q3 - Q1
+            # Calcul du Z-score
+            mean = self.df[col].mean()
+            std = self.df[col].std()
+            z_scores = np.abs((self.df[col] - mean) / std)
             
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            
-            outliers = (self.df[col] < lower_bound) | (self.df[col] > upper_bound)
+            # Anomalies si |Z| > 3
+            outliers = z_scores > 3
             self.outliers_mask[col] = outliers
             
             self.outliers_info[col] = {
                 'count': outliers.sum(),
-                'lower': lower_bound,
-                'upper': upper_bound
+                'mean': mean,
+                'std': std,
+                'threshold': 3
             }
             
             print(f"\n{col}:")
-            print(f"  Bounds : [{lower_bound:.2f}, {upper_bound:.2f}]")
+            print(f"  Moyenne : {mean:.2f}, Écart-type : {std:.2f}")
+            print(f"  Seuil Z-score : |Z| > 3")
             print(f"  Anomalies : {outliers.sum()}")
         
         total_outliers = self.outliers_mask.any(axis=1).sum()
         print(f"\n📊 Total lignes avec anomalies : {total_outliers}")
         
         return self
+        print(f"\n📊 Total lignes avec anomalies : {total_outliers}")
+        
+        return self
     
     def visualize_outliers(self, save_path='output/'):
-        """Crée des boxplots pour chaque colonne numérique"""
+        """Crée des boxplots pour chaque colonne numérique - LISIBLE"""
         print(f"\n📈 VISUALISATION DES OUTLIERS")
         print("-" * 60)
         
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
         axes = axes.flatten()
         
-        for idx, col in enumerate(NUMERIC_COLUMNS):
-            axes[idx].boxplot(self.df[col], vert=True)
-            axes[idx].set_title(f"Distribution : {col}", fontsize=12, fontweight='bold')
-            axes[idx].set_ylabel(col)
-            axes[idx].grid(axis='y', alpha=0.3)
+        colors_bp = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12']
         
+        for idx, col in enumerate(NUMERIC_COLUMNS):
+            # Boxplot avec meilleure visibilité
+            bp = axes[idx].boxplot(
+                self.df[col],
+                vert=True,
+                patch_artist=True,
+                widths=0.5,
+                boxprops=dict(facecolor=colors_bp[idx], alpha=0.7, linewidth=2),
+                whiskerprops=dict(linewidth=2),
+                capprops=dict(linewidth=2),
+                medianprops=dict(color='red', linewidth=2.5),
+                flierprops=dict(marker='o', markerfacecolor='red', markersize=8, alpha=0.8, linestyle='none')
+            )
+            
+            # Labels et titre
+            axes[idx].set_title(f"{col}", fontsize=14, fontweight='bold')
+            axes[idx].set_ylabel("Valeur", fontsize=11)
+            axes[idx].grid(axis='y', alpha=0.3, linestyle='--')
+            
+            # Ajouter les limites IQR
+            Q1 = self.df[col].quantile(0.25)
+            Q3 = self.df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower = Q1 - 1.5 * IQR
+            upper = Q3 + 1.5 * IQR
+            
+            # Afficher les limites Z-score (|Z| > 3)
+            mean = self.df[col].mean()
+            std = self.df[col].std()
+            z_upper = mean + 3 * std
+            z_lower = mean - 3 * std
+            
+            axes[idx].axhline(y=z_lower, color='orange', linestyle=':', linewidth=2, label=f'Z-score -3: {z_lower:.1f}')
+            axes[idx].axhline(y=z_upper, color='purple', linestyle=':', linewidth=2, label=f'Z-score +3: {z_upper:.1f}')
+            
+            # Nombre d'anomalies détectées
+            n_anomalies = self.outliers_info[col]['count']
+            axes[idx].legend(fontsize=9)
+            axes[idx].text(0.98, 0.97, f'Anomalies: {n_anomalies}', 
+                         transform=axes[idx].transAxes, fontsize=10, fontweight='bold',
+                         verticalalignment='top', horizontalalignment='right',
+                         bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.3))
+        
+        fig.suptitle('Détection des Outliers - Méthode Z-score (|Z| > 3)', fontsize=16, fontweight='bold', y=1.00)
         plt.tight_layout()
-        plt.savefig(f'{save_path}01_outliers_boxplots.png', dpi=100, bbox_inches='tight')
-        print(f"✓ Graphique sauvegardé : 01_outliers_boxplots.png")
-        plt.show()
+        plt.savefig(f'{save_path}01_outliers_boxplots.png', dpi=150, bbox_inches='tight')
+        print(f"✓ Graphique sauvegardé : 01_outliers_boxplots.png (HAUTE RÉSOLUTION)")
+        plt.close()
         
         return self
     
@@ -225,10 +269,14 @@ class KPIAnalyzer:
     
     def calculate_by_product(self):
         """Taux par produit recommandé"""
-        rates = self.df.groupby('recommended_product')['campaign_success'].agg([
+        df_clean = self.df.copy()
+        df_clean['recommended_product'] = df_clean['recommended_product'].str.strip().str.title()
+        df_clean = df_clean.dropna(subset=['recommended_product'])
+        
+        rates = df_clean.groupby('recommended_product')['campaign_success'].agg([
             ('taux', 'mean'),
             ('count', 'size')
-        ]).round(4)
+        ]).round(4).sort_values('taux', ascending=False)
         
         self.kpis['by_product'] = rates
         
@@ -256,8 +304,8 @@ class KPIAnalyzer:
         df_temp = self.df.copy()
         df_temp['age_group'] = pd.cut(
             df_temp['age'],
-            bins=[0, 20, 35, 50, 65, 120],
-            labels=['<20', '20-35', '35-50', '50-65', '65+']
+            bins=[0, 25, 45, 60, 120],
+            labels=['18-25', '26-45', '46-60', '60+']
         )
         
         rates = df_temp.groupby('age_group', observed=True)['campaign_success'].agg([
@@ -273,45 +321,95 @@ class KPIAnalyzer:
         return self
     
     def visualize_kpis(self, save_path='output/'):
-        """Crée des graphiques pour les KPI"""
+        """Crée des graphiques pour les KPI - AMÉLIORÉ"""
         print(f"\n📊 VISUALISATION DES KPI")
         print("-" * 60)
         
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
         
-        # Global rate
+        # 1. Global rate
         global_rate = self.kpis['global_success_rate']
-        axes[0, 0].bar(['Succès', 'Échec'], [global_rate, 1-global_rate], 
-                       color=['#2ecc71', '#e74c3c'])
-        axes[0, 0].set_title('Taux Global de Réussite', fontweight='bold')
+        bars1 = axes[0, 0].bar(['Succès', 'Échec'], [global_rate, 1-global_rate], 
+                               color=['#2ecc71', '#e74c3c'], width=0.6, alpha=0.8, edgecolor='black', linewidth=2)
+        axes[0, 0].set_title('Taux Global de Réussite', fontweight='bold', fontsize=13)
         axes[0, 0].set_ylim([0, 1])
+        axes[0, 0].set_ylabel('Taux', fontsize=11)
         axes[0, 0].axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+        # Ajouter les % sur les barres
+        for bar in bars1:
+            height = bar.get_height()
+            axes[0, 0].text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height*100:.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=11)
+        axes[0, 0].grid(axis='y', alpha=0.3)
         
-        # By product
-        self.kpis['by_product']['taux'].plot(kind='barh', ax=axes[0, 1], color='skyblue')
-        axes[0, 1].set_title('Taux par Produit', fontweight='bold')
-        axes[0, 1].set_xlabel('Taux de réussite')
+        # 2. By product (sans doublons)
+        product_data = self.kpis['by_product']['taux'].sort_values(ascending=True)
+        bars2 = axes[0, 1].barh(range(len(product_data)), product_data.values, 
+                                color=['#3498db', '#e74c3c', '#2ecc71'][:len(product_data)], 
+                                alpha=0.8, edgecolor='black', linewidth=2)
+        axes[0, 1].set_yticks(range(len(product_data)))
+        axes[0, 1].set_yticklabels(product_data.index, fontsize=11)
+        axes[0, 1].set_title('Taux par Produit', fontweight='bold', fontsize=13)
+        axes[0, 1].set_xlabel('Taux de réussite', fontsize=11)
         axes[0, 1].set_xlim([0, 1])
+        # Ajouter les % et count
+        for i, (bar, prod) in enumerate(zip(bars2, product_data.index)):
+            width = bar.get_width()
+            count = self.kpis['by_product'].loc[prod, 'count']
+            axes[0, 1].text(width, bar.get_y() + bar.get_height()/2.,
+                           f' {width*100:.1f}% (n={int(count)})', 
+                           ha='left', va='center', fontweight='bold', fontsize=10)
+        axes[0, 1].grid(axis='x', alpha=0.3)
         
-        # By channel
-        self.kpis['by_channel']['taux'].plot(kind='bar', ax=axes[1, 0], color='lightcoral')
-        axes[1, 0].set_title('Taux par Canal', fontweight='bold')
-        axes[1, 0].set_ylabel('Taux de réussite')
+        # 3. By channel
+        channel_data = self.kpis['by_channel']['taux'].sort_values(ascending=False)
+        bars3 = axes[1, 0].bar(range(len(channel_data)), channel_data.values,
+                               color=['#f39c12', '#3498db', '#e74c3c', '#95a5a6'][:len(channel_data)],
+                               alpha=0.8, edgecolor='black', linewidth=2)
+        axes[1, 0].set_xticks(range(len(channel_data)))
+        axes[1, 0].set_xticklabels(channel_data.index, fontsize=11, rotation=45, ha='right')
+        axes[1, 0].set_title('Taux par Canal', fontweight='bold', fontsize=13)
+        axes[1, 0].set_ylabel('Taux de réussite', fontsize=11)
         axes[1, 0].set_ylim([0, 1])
-        axes[1, 0].tick_params(axis='x', rotation=45)
+        # Ajouter les % et count
+        for bar, chan in zip(bars3, channel_data.index):
+            height = bar.get_height()
+            count = self.kpis['by_channel'].loc[chan, 'count']
+            axes[1, 0].text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height*100:.1f}%\n(n={int(count)})', 
+                           ha='center', va='bottom', fontweight='bold', fontsize=9)
+        axes[1, 0].grid(axis='y', alpha=0.3)
         
-        # By age group
-        self.kpis['by_age_group']['taux'].plot(kind='line', ax=axes[1, 1], 
-                                               marker='o', linewidth=2, markersize=8, color='#9b59b6')
-        axes[1, 1].set_title('Taux par Groupe d\'Âge', fontweight='bold')
-        axes[1, 1].set_ylabel('Taux de réussite')
+        # 4. By age group - AMÉLIORÉ
+        age_data = self.kpis['by_age_group']['taux']
+        age_counts = self.kpis['by_age_group']['count']
+        
+        # Tracer comme barres ET ligne
+        x_pos = range(len(age_data))
+        bars4 = axes[1, 1].bar(x_pos, age_data.values, alpha=0.6, color='#9b59b6', 
+                               edgecolor='black', linewidth=2, label='Taux')
+        axes[1, 1].plot(x_pos, age_data.values, marker='o', linewidth=3, markersize=10, 
+                       color='#9b59b6', label='Tendance')
+        axes[1, 1].set_xticks(x_pos)
+        axes[1, 1].set_xticklabels(age_data.index, fontsize=11)
+        axes[1, 1].set_title('Taux par Groupe d\'Âge', fontweight='bold', fontsize=13)
+        axes[1, 1].set_ylabel('Taux de réussite', fontsize=11)
         axes[1, 1].set_ylim([0, 1])
-        axes[1, 1].grid(alpha=0.3)
+        # Ajouter les % et population
+        for i, (bar, age) in enumerate(zip(bars4, age_data.index)):
+            height = bar.get_height()
+            count = age_counts.loc[age]
+            axes[1, 1].text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height*100:.1f}%\n(n={int(count)})', 
+                           ha='center', va='bottom', fontweight='bold', fontsize=9)
+        axes[1, 1].grid(axis='y', alpha=0.3)
+        axes[1, 1].legend(loc='upper left', fontsize=10)
         
+        fig.suptitle('Analyse des KPI - Taux de Réussite par Segment', fontsize=16, fontweight='bold', y=0.995)
         plt.tight_layout()
-        plt.savefig(f'{save_path}02_kpi_analysis.png', dpi=100, bbox_inches='tight')
-        print(f"✓ Graphique sauvegardé : 02_kpi_analysis.png")
-        plt.show()
+        plt.savefig(f'{save_path}02_kpi_analysis.png', dpi=150, bbox_inches='tight')
+        print(f"✓ Graphique sauvegardé : 02_kpi_analysis.png (HAUTE RÉSOLUTION)")
+        plt.close()
         
         return self
 
@@ -403,6 +501,10 @@ def main():
     
     df_no_outliers = detector.get_clean_data()
     print(f"\n✓ Dataset après suppression outliers : {len(df_no_outliers)} lignes")
+    
+    # Supprimer les produits invalides (Test, etc.)
+    df_no_outliers = df_no_outliers[~df_no_outliers['recommended_product'].isin(['Test', 'Nan', ''])]
+    print(f"✓ Dataset après suppression produits invalides : {len(df_no_outliers)} lignes")
     
     # ÉTAPE 3: Calculer les KPI
     print(f"\n📊 ANALYSE DES KPI")
